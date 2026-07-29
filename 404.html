@@ -1,17 +1,29 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Workout Timer</title>
 <script>
-// GitHub Pages PWA fix: redirect any 404 back to index
-var path = window.location.pathname;
-var repo = '/Workout-Timer';
-if (path.indexOf(repo) === 0) {
-  window.location.replace(repo + '/');
-} else {
-  window.location.replace('/');
-}
+// Send any unknown URL back to the app. The repo name is worked out from the
+// path instead of hardcoded, so renaming the repo can't break this.
+(function () {
+  var parts = location.pathname.split('/').filter(Boolean);
+  var base = parts.length ? '/' + parts[0] + '/' : '/';
+  // Only redirect if we're not already there — otherwise this loops forever.
+  if (location.pathname !== base) location.replace(base);
+})();
 </script>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f7f5f2;color:#2d5a3d;
+       display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
+  a{color:#2d5a3d}
+</style>
 </head>
-<body></body>
+<body>
+  <div>
+    <p>That page doesn't exist.</p>
+    <p><a href="./">Open Workout Timer</a></p>
+  </div>
+</body>
 </html>
