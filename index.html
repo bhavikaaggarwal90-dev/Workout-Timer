@@ -170,7 +170,7 @@ header p{font-size:0.7rem;color:var(--muted);margin-top:3px;letter-spacing:0.08e
 </style>
 </head>
 <body>
-<header><h1>Workout Timer</h1><p>Track every second</p></header>
+<header><h1>Workout Timer</h1><p>Track every second &#183; v2.0</p></header>
 <div class="nav-tabs">
   <button class="nav-tab active" id="tab-timer" onclick="switchTab('timer')">&#9201; Timer</button>
   <button class="nav-tab" id="tab-plan" onclick="switchTab('plan')">&#128203; Plan</button>
@@ -330,6 +330,45 @@ function blockRounds(){
   if(!activeBlock)return 0;
   return activeBlock.items.reduce(function(m,it){return Math.max(m,it.plannedSets||0);},0);
 }
+
+/* ---- screen wake lock: keeps the phone awake during a workout, which is
+   both convenient and the single best way to stop iOS discarding the page
+   mid-set. Silently unavailable on older browsers. ---- */
+var _wakeLock=null;
+function requestWakeLock(){
+  try{
+    if(!navigator.wakeLock||_wakeLock||!sessionStartMs)return;
+    navigator.wakeLock.request('screen').then(function(wl){
+      _wakeLock=wl;
+      wl.addEventListener('release',function(){_wakeLock=null;});
+    }).catch(function(){});
+  }catch(e){}
+}
+function releaseWakeLock(){try{if(_wakeLock){_wakeLock.release();}}catch(e){}_wakeLock=null;}
+
+/* iOS does not reliably fire visibilitychange when you swap apps, so listen
+   for pagehide/blur too and save on all of them. */
+function attachLifecycle(){
+  detachLifecycle();
+  document.addEventListener('visibilitychange',handleVisibility);
+  if(typeof window!=='undefined'&&window.addEventListener){
+    window.addEventListener('pagehide',onHide);
+    window.addEventListener('blur',onHide);
+    window.addEventListener('pageshow',handleVisibility);
+    window.addEventListener('focus',handleVisibility);
+  }
+}
+function detachLifecycle(){
+  document.removeEventListener('visibilitychange',handleVisibility);
+  if(typeof window!=='undefined'&&window.removeEventListener){
+    window.removeEventListener('pagehide',onHide);
+    window.removeEventListener('blur',onHide);
+    window.removeEventListener('pageshow',handleVisibility);
+    window.removeEventListener('focus',handleVisibility);
+  }
+}
+var _lastHiddenMs=null;
+function onHide(){_lastHiddenMs=nowMs();saveSession();}
 
 function switchTab(tab){
   ['timer','plan','history'].forEach(function(t){
@@ -596,7 +635,7 @@ function syncRestUI(){
    SCREEN / TICKS
    ============================================================ */
 function showScreen(name){['start','active','summary'].forEach(function(s){document.getElementById('screen-'+s).classList.toggle('hidden',s!==name);});}
-function startSessionTick(){clearInterval(_sessionTick);_sessionTick=setInterval(function(){if(sessionStartMs)document.getElementById('session-elapsed').textContent='Session: '+fmt((nowMs()-sessionStartMs)/1000);},500);}
+function startSessionTick(){clearInterval(_sessionTick);syncSessionDisplay();_sessionTick=setInterval(syncSessionDisplay,500);}
 function startSaveTick(){clearInterval(_saveTick);_saveTick=setInterval(function(){if(sessionStartMs)saveSession();},3000);}
 
 function startWorkTick(){
@@ -656,20 +695,44 @@ function afterRest(){
 
 /* ============================================================
    VISIBILITY (phone locked / app backgrounded)
+   All timing is wall-clock (nowMs() minus a stored timestamp), so the
+   clock never stops just because the app is in the background — coming
+   back simply re-syncs the display to the real elapsed time.
    ============================================================ */
+function syncTimerDisplay(){
+  var d=document.getElementById('timer-display');if(!d)return;
+  if(planComplete&&!isResting)return;
+  if(isResting&&restStartMs)d.textContent=fmt(Math.max(0,restTotalSec-(nowMs()-restStartMs)/1000));
+  else if(setStartMs)d.textContent=fmt((nowMs()-setStartMs)/1000);
+}
+function syncSessionDisplay(){
+  var e=document.getElementById('session-elapsed');
+  if(e&&sessionStartMs)e.textContent='Session: '+fmt((nowMs()-sessionStartMs)/1000);
+}
+
 function handleVisibility(){
-  if(document.visibilityState==='hidden'){saveSession();return;}
+  if(document.visibilityState==='hidden'){onHide();return;}
   if(!sessionStartMs) return;
+  var away=_lastHiddenMs?(nowMs()-_lastHiddenMs):0;
+  _lastHiddenMs=null;
+  requestWakeLock();
+  syncSessionDisplay();
+
   if(isResting&&restStartMs){
     var elapsedMs=nowMs()-restStartMs;
     if(elapsedMs/1000>=restTotalSec){
       /* Count the whole away-period as rest — no set was performed while
          the screen was off, so it must not land in "working" time. */
       completeRest(elapsedMs);
-      addLog('Rest done (while away)','\u2192 go!');
+      addLog('Rest done (while away)','+'+fmtD(elapsedMs));
       afterRest();
-    } else {startRestTick();}
-  } else if(!isResting&&setStartMs&&!planComplete){startWorkTick();}
+    } else {syncTimerDisplay();startRestTick();}
+  } else if(!isResting&&setStartMs&&!planComplete){
+    /* The set kept running the whole time you were away. */
+    if(away>60000&&curEx())addLog('Back \u2014 '+curEx().name+' still running',fmtD(nowMs()-setStartMs)+' so far');
+    syncTimerDisplay();startWorkTick();
+  }
+  saveSession();
 }
 
 /* ============================================================
@@ -763,8 +826,7 @@ function beginSession(){
   document.getElementById('log-entries').innerHTML='';
   hideNextUpCard();
   startSessionTick();startSaveTick();
-  document.removeEventListener('visibilitychange',handleVisibility);
-  document.addEventListener('visibilitychange',handleVisibility);
+  attachLifecycle();requestWakeLock();
 }
 
 function startWorkoutFromPlan(){
@@ -802,6 +864,7 @@ function enterWorkingState(preserveStart){
   document.getElementById('timer-display').textContent=fmt(setStartMs?(nowMs()-setStartMs)/1000:0);
   updateDoneButton();
   startWorkTick();
+  saveSession();          // persist the instant state changes, not 3s later
 }
 
 function enterRestState(kind){
@@ -816,6 +879,7 @@ function enterRestState(kind){
   document.getElementById('timer-display').textContent=fmt(restTotalSec);
   updateDoneButton();
   startRestTick();
+  saveSession();
 }
 
 function restartRest(){
@@ -1078,6 +1142,7 @@ function showPlanComplete(){
   document.getElementById('progress-wrap').classList.add('hidden');
   updateDoneButton();
   showNextUpCard();
+  saveSession();
 }
 
 function logType(label){if(label.startsWith('\u2192')||/exercise|renamed|superset|round/i.test(label))return 'nav';if(label.indexOf('Rest')===0)return 'rest';if(label.indexOf('Set')>-1)return 'set';return 'info';}
@@ -1113,7 +1178,7 @@ function endWorkout(){
   var snap=sessionStartMs;
   clearSession();
   clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);clearInterval(_saveTick);
-  sessionStartMs=null;document.removeEventListener('visibilitychange',handleVisibility);
+  sessionStartMs=null;detachLifecycle();releaseWakeLock();
   if(!isResting&&setStartMs&&curEx()&&!planComplete)logCurrentSet();
   var totalMs=snap?(nowMs()-snap):0;
   var totalRestMs=accRestMs+(isResting&&restStartMs?nowMs()-restStartMs:0);
@@ -1144,7 +1209,7 @@ function endWorkout(){
    ============================================================ */
 function resetApp(){
   clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);clearInterval(_saveTick);
-  document.removeEventListener('visibilitychange',handleVisibility);
+  detachLifecycle();releaseWakeLock();
   restSetSec=30;restExSec=60;sessionStartMs=setStartMs=restStartMs=null;restTotalSec=accRestMs=0;restOwnerIdx=-1;
   isResting=false;restKind='set';changingEx=false;currentExIdx=-1;totalSets=0;
   exercises=[];logEntries=[];planIndex=0;activeBlock=null;blockDone=false;planComplete=false;
@@ -1206,7 +1271,7 @@ document.addEventListener('DOMContentLoaded',function(){
   if(restoreSession()){
     syncRestUI();showScreen('active');refreshUI();rebuildLogUI();
     startSessionTick();startSaveTick();
-    document.addEventListener('visibilitychange',handleVisibility);
+    attachLifecycle();requestWakeLock();
     if(planComplete&&blockDone&&!isResting){showPlanComplete();return;}
     if(isResting){
       var elapsedMs=restStartMs?(nowMs()-restStartMs):restTotalSec*1000;
