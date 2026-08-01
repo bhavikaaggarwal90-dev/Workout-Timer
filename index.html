@@ -75,6 +75,18 @@ header p{font-size:0.7rem;color:var(--muted);margin-top:3px;letter-spacing:0.08e
 .superset-item{display:flex;align-items:baseline;justify-content:space-between;padding:5px 0;border-bottom:1px solid #d4c0f0;font-size:0.72rem}
 .superset-item:last-child{border-bottom:none}
 .superset-item-note{font-size:0.62rem;color:var(--muted)}
+.superset-item.now{color:var(--purple);font-weight:500}
+.superset-item.done{opacity:0.45}
+.superset-item.done span:first-child{text-decoration:line-through}
+.ss-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#d4c0f0;margin-right:8px;vertical-align:middle}
+.superset-item.now .ss-dot{background:var(--purple);box-shadow:0 0 0 3px rgba(107,63,160,0.18)}
+.superset-item.done .ss-dot{background:var(--muted)}
+.btn-purple{background:var(--purple);color:#fff;border-color:var(--purple)}
+.next-up-card{background:var(--accent-light);border:1px solid #b8d4be;border-radius:var(--radius);padding:14px 18px}
+.next-up-label{font-size:0.65rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+.next-up-name{font-family:'Fraunces',serif;font-size:1.05rem;font-weight:300;margin-bottom:11px;line-height:1.3}
+.next-up-row{display:flex;gap:8px}
+.next-up-row .btn{flex:1}
 .superset-next-btn{font-family:'DM Mono',monospace;font-size:0.65rem;letter-spacing:0.06em;text-transform:uppercase;border:1px solid var(--purple);border-radius:6px;padding:8px 12px;cursor:pointer;background:var(--purple);color:#fff;width:100%;margin-top:8px}
 .queue-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 18px}
 .queue-item{display:flex;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.7rem}
@@ -207,9 +219,8 @@ header p{font-size:0.7rem;color:var(--muted);margin-top:3px;letter-spacing:0.08e
       </div>
     </div>
     <div id="superset-block" class="superset-queue hidden">
-      <div class="superset-label">&#128279; Superset &#8212; up next</div>
+      <div class="superset-label" id="superset-label">&#128279; Superset</div>
       <div id="superset-list"></div>
-      <button class="superset-next-btn" onclick="nextSupersetExercise()">&#8594; Next in superset</button>
     </div>
     <div class="timer-card state-working" id="timer-card">
       <div class="timer-label" id="timer-label">WORKING</div>
@@ -222,6 +233,14 @@ header p{font-size:0.7rem;color:var(--muted);margin-top:3px;letter-spacing:0.08e
         <input type="text" id="new-ex-input" placeholder="Exercise name&#8230;"/>
         <button class="btn btn-orange btn-sm" onclick="confirmChangeExercise()">OK</button>
         <button class="btn btn-ghost btn-sm" onclick="cancelChangeExercise()">&#10005;</button>
+      </div>
+    </div>
+    <div id="next-up-card" class="next-up-card hidden">
+      <div class="next-up-label" id="next-up-label">Up next</div>
+      <div class="next-up-name" id="next-up-name">&#8212;</div>
+      <div class="next-up-row">
+        <button class="btn btn-dark btn-sm" id="next-up-start" onclick="nextUpPrimary()">Start now</button>
+        <button class="btn btn-ghost btn-sm" onclick="addExtraRound()">+ Another round</button>
       </div>
     </div>
     <div id="queue-card" class="queue-card hidden"><div class="card-title">Up next</div><div id="queue-list"></div></div>
@@ -268,15 +287,49 @@ header p{font-size:0.7rem;color:var(--muted);margin-top:3px;letter-spacing:0.08e
 <div id="tab-content-history" class="hidden"><div id="history-list"></div></div>
 </div>
 <script>
+/* ============================================================
+   STATE
+   ------------------------------------------------------------
+   A workout is a sequence of BLOCKS. A block is either a single
+   exercise or a superset of 2+ exercises performed back-to-back.
+
+   activeBlock = {
+     type : 'single' | 'superset',
+     round: 1,          // which round (= which set number) we're on
+     idx  : 0,          // which movement inside the block is live
+     items: [ {name, note, plannedSets, exIdx} ]
+   }
+
+   Each item points at ONE runtime record in exercises[] that lives
+   for the whole block, so set counts accumulate across rounds
+   instead of restarting at 1 every time we switch movement.
+   ============================================================ */
 var restSetSec=30,restExSec=60;
 var sessionStartMs=null,setStartMs=null,restStartMs=null;
-var restTotalSec=0,accRestMs=0;
+var restTotalSec=0,accRestMs=0,restOwnerIdx=-1;
 var isResting=false,restKind='set',changingEx=false;
-var currentExercise=null,currentSetNum=1,totalSets=0;
+var currentExIdx=-1,totalSets=0;
 var exercises=[],logEntries=[];
-var _sessionTick=null,_workTick=null,_restTick=null;
+var _sessionTick=null,_workTick=null,_restTick=null,_saveTick=null;
 var _audioCtx=null,_audioUnlocked=false;
-var workoutPlan=[],planIndex=0,supersetQueue=[],parsedPlan=[];
+var workoutPlan=[],planIndex=0,parsedPlan=[];
+var activeBlock=null,blockDone=false,planComplete=false;
+
+/* ---- accessors ---- */
+function curEx(){return(currentExIdx>=0&&currentExIdx<exercises.length)?exercises[currentExIdx]:null;}
+function curItem(){return activeBlock?activeBlock.items[activeBlock.idx]:null;}
+function curSetNum(){var e=curEx();return e?e.sets.length+1:1;}
+function itemSetsDone(it){var e=exercises[it.exIdx];return e?e.sets.length:0;}
+function itemHasRemaining(it){return it.plannedSets<=0||itemSetsDone(it)<it.plannedSets;}
+function nextRemainingIdx(from){
+  if(!activeBlock)return -1;
+  for(var i=from;i<activeBlock.items.length;i++){if(itemHasRemaining(activeBlock.items[i]))return i;}
+  return -1;
+}
+function blockRounds(){
+  if(!activeBlock)return 0;
+  return activeBlock.items.reduce(function(m,it){return Math.max(m,it.plannedSets||0);},0);
+}
 
 function switchTab(tab){
   ['timer','plan','history'].forEach(function(t){
@@ -311,21 +364,46 @@ function playTing(style){
       };
       if(style==='single'){beep(t,880,0.7);}
       else if(style==='double'){beep(t,880,0.5);beep(t+0.32,1100,0.7);}
+      else if(style==='swap'){beep(t,1320,0.18);beep(t+0.16,1320,0.22);}
       else if(style==='end'){beep(t,660,0.4);beep(t+0.22,880,0.4);beep(t+0.44,1100,0.9);}
     };
     if(ctx.state==='suspended') ctx.resume().then(go); else go();
   }catch(e){}
 }
 
-/* PARSER */
+/* ============================================================
+   PARSER
+   ============================================================ */
 function parsePlan(){
   var raw=document.getElementById('paste-input').value.trim();
   if(!raw) return;
   var lines=raw.split('\n').map(function(l){return l.trim();}).filter(function(l){return l.length>0;});
   var result=[];
   var supersetGroupId=0;
-  var skipRe=/^(back|chest|legs?|arms?|shoulders?|core|conditioning|running|cardio|warm[\s-]?up|stretching|cool[\s-]?down|workout of the day|wod|rest between|no break)[:\s]/i;
-  var superRe=/^super[\s-]?set\s+with\s+/i;
+  /* Section headers to ignore. NOTE the guard below: these words also start
+     real exercises ("Leg press", "Back squat", "Chest press", "Shoulder press"),
+     so a line is only treated as a header when it carries no sets/reps/weight. */
+  var skipRe=/^(back|chest|legs?|arms?|shoulders?|core|conditioning|running|cardio|warm[\s-]?up|stretching|cool[\s-]?down|workout of the day|wod|rest between|no break)(?:[:\s]|$)/i;
+  var workRe=/\d+\s*(?:reps?|sets?)\b|\d+\s*[x\xd7]\s*\d+|\d+\s*kg/i;
+  var superRe=/^(?:super[\s-]?set|ss)\s*(?:with|:)?\s+/i;
+  var inlineRe=/\s+(?:super[\s-]?set(?:ted)?|ss)\s+with\s+/i;
+
+  /* A superset written on one line ("A 15x3 superset with B 15x4") is split
+     into two lines so it flows through the same code path as the two-line form. */
+  var expanded=[];
+  lines.forEach(function(l){
+    if(superRe.test(l)){expanded.push(l);return;}
+    var m=l.match(inlineRe);
+    if(m){
+      var at=l.search(inlineRe);
+      var head=l.slice(0,at).trim(),tail=l.slice(at+m[0].length).trim();
+      if(head)expanded.push(head);
+      if(tail)expanded.push('super set with '+tail);
+      return;
+    }
+    expanded.push(l);
+  });
+  lines=expanded;
 
   function extractInfo(line){
     line=line.replace(/^[-\u2013\u2022*]\s*/,'');
@@ -351,13 +429,16 @@ function parsePlan(){
       .replace(/\d+\s*sets?/ig,'')
       .replace(/\d+\s*reps?/ig,'')
       .replace(/\d+\s*kg/ig,'')
-      .replace(/[:;,]+$/,'')
-      .replace(/\s+/g,' ').trim();
+      .replace(/\s+/g,' ').trim()
+      /* strip trailing punctuation AFTER trimming, otherwise "Chin ups: 15 x 3 sets"
+         collapses to "Chin ups: " and keeps its colon */
+      .replace(/[\s:;,.\-\u2013]+$/,'')
+      .replace(/^[\s:;,.\-\u2013]+/,'').trim();
     var noteParts=[];
     if(sets) noteParts.push(sets+' sets');
     if(reps) noteParts.push(reps+' reps');
     if(weight) noteParts.push(weight);
-    return{name:name,note:noteParts.join(' · '),sets:sets?parseInt(sets):3};
+    return{name:name,note:noteParts.join(' \u00b7 '),sets:sets?parseInt(sets,10):3};
   }
 
   for(var i=0;i<lines.length;i++){
@@ -367,41 +448,56 @@ function parsePlan(){
       if(rest.length>2){
         var info=extractInfo(rest);
         if(info.name.length>1){
-          if(result.length>0&&!result[result.length-1].supersetGroup){
+          if(result.length===0){
+            /* nothing to pair with — treat as a normal exercise */
+            result.push(Object.assign({},info,{supersetGroup:null}));
+          } else if(!result[result.length-1].supersetGroup){
             supersetGroupId++;
             result[result.length-1].supersetGroup=supersetGroupId;
-          } else if(result.length>0){supersetGroupId=result[result.length-1].supersetGroup;}
-          result.push(Object.assign({},info,{supersetGroup:supersetGroupId}));
+            result.push(Object.assign({},info,{supersetGroup:supersetGroupId}));
+          } else {
+            /* third+ movement — join the group already in progress (tri-sets) */
+            supersetGroupId=result[result.length-1].supersetGroup;
+            result.push(Object.assign({},info,{supersetGroup:supersetGroupId}));
+          }
         }
       }
       continue;
     }
-    if(skipRe.test(line)||line.length<4||/^\d+$/.test(line)) continue;
-    var info=extractInfo(line);
-    if(info.name.length>2) result.push(Object.assign({},info,{supersetGroup:null}));
+    if(line.length<3||/^\d+$/.test(line)) continue;
+    if(skipRe.test(line)&&!workRe.test(line)) continue;
+    var info2=extractInfo(line);
+    if(info2.name.length>2) result.push(Object.assign({},info2,{supersetGroup:null}));
   }
   parsedPlan=result;
   if(parsedPlan.length===0){alert('Could not parse any exercises. Please check the format.');return;}
   renderParsedPreview();
 }
 
+function planGroups(list){
+  var groups=[],i=0;
+  while(i<list.length){
+    var e=list[i];
+    if(e.supersetGroup){
+      var g=[];
+      while(i<list.length&&list[i].supersetGroup===e.supersetGroup){g.push(list[i]);i++;}
+      groups.push(g);
+    } else {groups.push([e]);i++;}
+  }
+  return groups;
+}
+
 function renderParsedPreview(){
   var container=document.getElementById('parsed-preview');
   container.innerHTML='';
-  var groups=[],seen={};
-  parsedPlan.forEach(function(ex){
-    if(ex.supersetGroup&&!seen[ex.supersetGroup]){
-      seen[ex.supersetGroup]=true;
-      groups.push({type:'superset',id:ex.supersetGroup,items:parsedPlan.filter(function(e){return e.supersetGroup===ex.supersetGroup;})});
-    } else if(!ex.supersetGroup){groups.push({type:'single',items:[ex]});}
-  });
-  groups.forEach(function(g){
+  planGroups(parsedPlan).forEach(function(g){
     var div=document.createElement('div');div.className='parsed-group';
-    if(g.type==='superset'){
-      div.innerHTML='<div class="parsed-group-label">&#128279; Superset</div>';
-      g.items.forEach(function(ex){div.innerHTML+='<div class="parsed-ex-row"><span class="parsed-ex-name">'+ex.name+'</span><span class="parsed-ex-detail">'+ex.note+'</span></div>';});
+    if(g.length>1){
+      var rounds=g.reduce(function(m,e){return Math.max(m,e.sets||0);},0);
+      div.innerHTML='<div class="parsed-group-label">&#128279; Superset &#183; '+rounds+' rounds</div>';
+      g.forEach(function(ex){div.innerHTML+='<div class="parsed-ex-row"><span class="parsed-ex-name">'+ex.name+'</span><span class="parsed-ex-detail">'+ex.note+'</span></div>';});
     } else {
-      div.innerHTML='<div class="parsed-ex-row"><span class="parsed-ex-name">'+g.items[0].name+'</span><span class="parsed-ex-detail">'+g.items[0].note+'</span></div>';
+      div.innerHTML='<div class="parsed-ex-row"><span class="parsed-ex-name">'+g[0].name+'</span><span class="parsed-ex-detail">'+g[0].note+'</span></div>';
     }
     container.appendChild(div);
   });
@@ -434,21 +530,39 @@ function updateStartPlanUI(){
   if(!workoutPlan.length) return;
   document.getElementById('start-plan-loaded').classList.remove('hidden');
   document.getElementById('start-manual').classList.add('hidden');
-  document.getElementById('start-plan-summary').textContent=workoutPlan.length+' exercises: '+workoutPlan.map(function(e){return e.name;}).join(', ');
+  var groups=planGroups(workoutPlan);
+  document.getElementById('start-plan-summary').textContent=
+    groups.length+' blocks / '+workoutPlan.length+' exercises: '+
+    groups.map(function(g){return g.map(function(e){return e.name;}).join(' + ');}).join(', ');
 }
 
-/* PERSISTENCE */
-var SESSION_KEY='wt_session_v6';
+/* ============================================================
+   PERSISTENCE
+   ============================================================ */
+var SESSION_KEY='wt_session_v7';
 function saveSession(){
   if(!sessionStartMs) return;
-  try{localStorage.setItem(SESSION_KEY,JSON.stringify({restSetSec:restSetSec,restExSec:restExSec,sessionStartMs:sessionStartMs,setStartMs:setStartMs,restStartMs:restStartMs,restTotalSec:restTotalSec,accRestMs:accRestMs,isResting:isResting,restKind:restKind,changingEx:changingEx,currentExercise:currentExercise,currentSetNum:currentSetNum,totalSets:totalSets,exercises:exercises,logEntries:logEntries,workoutPlan:workoutPlan,planIndex:planIndex,supersetQueue:supersetQueue}));}catch(e){}
+  try{localStorage.setItem(SESSION_KEY,JSON.stringify({
+    restSetSec:restSetSec,restExSec:restExSec,sessionStartMs:sessionStartMs,setStartMs:setStartMs,
+    restStartMs:restStartMs,restTotalSec:restTotalSec,accRestMs:accRestMs,restOwnerIdx:restOwnerIdx,
+    isResting:isResting,restKind:restKind,changingEx:changingEx,blockDone:blockDone,planComplete:planComplete,
+    currentExIdx:currentExIdx,totalSets:totalSets,exercises:exercises,logEntries:logEntries,
+    workoutPlan:workoutPlan,planIndex:planIndex,activeBlock:activeBlock
+  }));}catch(e){}
 }
 function clearSession(){try{localStorage.removeItem(SESSION_KEY);}catch(e){}}
 function restoreSession(){
   try{
     var s=JSON.parse(localStorage.getItem(SESSION_KEY));
     if(!s||!s.sessionStartMs) return false;
-    restSetSec=s.restSetSec;restExSec=s.restExSec;sessionStartMs=s.sessionStartMs;setStartMs=s.setStartMs;restStartMs=s.restStartMs;restTotalSec=s.restTotalSec;accRestMs=s.accRestMs;isResting=s.isResting;restKind=s.restKind;changingEx=s.changingEx;currentExercise=s.currentExercise;currentSetNum=s.currentSetNum;totalSets=s.totalSets;exercises=s.exercises;logEntries=s.logEntries;workoutPlan=s.workoutPlan||[];planIndex=s.planIndex||0;supersetQueue=s.supersetQueue||[];
+    restSetSec=s.restSetSec;restExSec=s.restExSec;sessionStartMs=s.sessionStartMs;setStartMs=s.setStartMs;
+    restStartMs=s.restStartMs;restTotalSec=s.restTotalSec;accRestMs=s.accRestMs;
+    restOwnerIdx=(s.restOwnerIdx==null?-1:s.restOwnerIdx);
+    isResting=s.isResting;restKind=s.restKind;changingEx=s.changingEx;
+    blockDone=!!s.blockDone;planComplete=!!s.planComplete;
+    currentExIdx=(s.currentExIdx==null?-1:s.currentExIdx);
+    totalSets=s.totalSets;exercises=s.exercises||[];logEntries=s.logEntries||[];
+    workoutPlan=s.workoutPlan||[];planIndex=s.planIndex||0;activeBlock=s.activeBlock||null;
     return true;
   }catch(e){return false;}
 }
@@ -457,14 +571,18 @@ function loadHistory(){try{return JSON.parse(localStorage.getItem(HISTORY_KEY))|
 function saveToHistory(r){try{var h=loadHistory();h.unshift(r);localStorage.setItem(HISTORY_KEY,JSON.stringify(h));}catch(e){}}
 function deleteFromHistory(id){try{var h=loadHistory().filter(function(r){return r.id!==id;});localStorage.setItem(HISTORY_KEY,JSON.stringify(h));renderHistory();}catch(e){}}
 
-/* HELPERS */
+/* ============================================================
+   HELPERS
+   ============================================================ */
 function fmt(sec){sec=Math.max(0,Math.round(sec));return String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');}
 function fmtD(ms){var s=Math.round(ms/1000);if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;return r?m+'m '+r+'s':m+'m';}
-function fmtDate(ts){var d=new Date(ts);return d.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'})+' · '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}
+function fmtDate(ts){var d=new Date(ts);return d.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short'})+' \u00b7 '+d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});}
 function nowMs(){return Date.now();}
-function newEx(name,note){return{name:name,note:note||'',sets:[],totalWorkMs:0,totalRestMs:0};}
+function newEx(name,note,isSuper){return{name:name,note:note||'',superset:!!isSuper,sets:[],totalWorkMs:0,totalRestMs:0};}
 
-/* REST CONFIG */
+/* ============================================================
+   REST CONFIG
+   ============================================================ */
 function adjustRest(type,delta){
   if(type==='set'){restSetSec=Math.max(5,restSetSec+delta);['rv-set-s','rv-set-a'].forEach(function(id){document.getElementById(id).textContent=restSetSec+'s';});}
   else{restExSec=Math.max(5,restExSec+delta);['rv-ex-s','rv-ex-a'].forEach(function(id){document.getElementById(id).textContent=restExSec+'s';});}
@@ -474,29 +592,13 @@ function syncRestUI(){
   ['rv-ex-s','rv-ex-a'].forEach(function(id){document.getElementById(id).textContent=restExSec+'s';});
 }
 
-/* SCREEN */
+/* ============================================================
+   SCREEN / TICKS
+   ============================================================ */
 function showScreen(name){['start','active','summary'].forEach(function(s){document.getElementById('screen-'+s).classList.toggle('hidden',s!==name);});}
 function startSessionTick(){clearInterval(_sessionTick);_sessionTick=setInterval(function(){if(sessionStartMs)document.getElementById('session-elapsed').textContent='Session: '+fmt((nowMs()-sessionStartMs)/1000);},500);}
+function startSaveTick(){clearInterval(_saveTick);_saveTick=setInterval(function(){if(sessionStartMs)saveSession();},3000);}
 
-/* VISIBILITY */
-function handleVisibility(){
-  if(document.visibilityState==='hidden'){saveSession();}
-  else{
-    if(!sessionStartMs) return;
-    if(isResting&&restStartMs){
-      var elapsed=(nowMs()-restStartMs)/1000;
-      if(elapsed>=restTotalSec){
-        clearInterval(_restTick);accRestMs+=restTotalSec*1000;
-        if(currentExercise)currentExercise.totalRestMs+=restTotalSec*1000;
-        restStartMs=null;isResting=false;
-        addLog('Rest done','→ go!');
-        if(!changingEx)enterWorkingState(false);
-      } else {startRestTick();}
-    } else if(!isResting){startWorkTick();}
-  }
-}
-
-/* TICKS */
 function startWorkTick(){
   clearInterval(_workTick);
   _workTick=setInterval(function(){if(!isResting&&setStartMs)document.getElementById('timer-display').textContent=fmt((nowMs()-setStartMs)/1000);},500);
@@ -509,119 +611,234 @@ function startRestTick(){
     document.getElementById('timer-display').textContent=fmt(remaining);
     document.getElementById('progress-bar').style.width=((remaining/restTotalSec)*100)+'%';
     if(remaining<=0){
-      clearInterval(_restTick);accRestMs+=restTotalSec*1000;
-      if(currentExercise)currentExercise.totalRestMs+=restTotalSec*1000;
-      restStartMs=null;isResting=false;
+      completeRest(restTotalSec*1000);
       playTing(restKind==='ex'?'double':'single');
-      addLog('Rest done','→ go!');
-      if(!changingEx)enterWorkingState(false);
+      addLog('Rest done','\u2192 go!');
+      afterRest();
     }
   },250);
 }
 
-/* PLAN NAVIGATION */
-function loadNextFromPlan(){
-  if(planIndex>=workoutPlan.length) return false;
-  var ex=workoutPlan[planIndex];planIndex++;
-  supersetQueue=[];
-  if(ex.supersetGroup){
-    while(planIndex<workoutPlan.length&&workoutPlan[planIndex].supersetGroup===ex.supersetGroup){supersetQueue.push(workoutPlan[planIndex]);planIndex++;}
+/* Bank the rest that just elapsed against the exercise it belonged to.
+   In a superset the rest is taken by the whole block, not by whichever
+   movement happened to be last, so share it across the movements worked. */
+function completeRest(ms){
+  clearInterval(_restTick);
+  ms=Math.max(0,ms||0);
+  accRestMs+=ms;
+  var ownerIdx=(restOwnerIdx>=0&&restOwnerIdx<exercises.length)?restOwnerIdx:currentExIdx;
+  var shared=null;
+  if(activeBlock&&activeBlock.type==='superset'){
+    var inBlock=activeBlock.items.some(function(it){return it.exIdx===ownerIdx;});
+    if(inBlock){
+      shared=activeBlock.items.filter(function(it){
+        var e=exercises[it.exIdx];return e&&e.sets.length>0;
+      });
+    }
   }
-  currentExercise=newEx(ex.name,ex.note||'');exercises.push(currentExercise);currentSetNum=1;
-  updateExDisplay();updateSupersetBlock();updateQueueBlock();
+  if(shared&&shared.length){
+    var each=ms/shared.length;
+    shared.forEach(function(it){exercises[it.exIdx].totalRestMs+=each;});
+  } else {
+    var owner=(ownerIdx>=0&&ownerIdx<exercises.length)?exercises[ownerIdx]:null;
+    if(owner)owner.totalRestMs+=ms;
+  }
+  restStartMs=null;isResting=false;restOwnerIdx=-1;
+}
+
+/* What happens the moment a rest finishes. */
+function afterRest(){
+  if(changingEx) return;              // waiting on the user to name the next exercise
+  if(planComplete){showPlanComplete();return;}
+  if(blockDone){startNextBlockNow(true);return;}
+  enterWorkingState(false);
+}
+
+/* ============================================================
+   VISIBILITY (phone locked / app backgrounded)
+   ============================================================ */
+function handleVisibility(){
+  if(document.visibilityState==='hidden'){saveSession();return;}
+  if(!sessionStartMs) return;
+  if(isResting&&restStartMs){
+    var elapsedMs=nowMs()-restStartMs;
+    if(elapsedMs/1000>=restTotalSec){
+      /* Count the whole away-period as rest — no set was performed while
+         the screen was off, so it must not land in "working" time. */
+      completeRest(elapsedMs);
+      addLog('Rest done (while away)','\u2192 go!');
+      afterRest();
+    } else {startRestTick();}
+  } else if(!isResting&&setStartMs&&!planComplete){startWorkTick();}
+}
+
+/* ============================================================
+   BLOCK CONSTRUCTION / NAVIGATION
+   ============================================================ */
+function makeBlock(entries,type){
+  var items=entries.map(function(p){
+    var ex=newEx(p.name,p.note||'',type==='superset');
+    exercises.push(ex);
+    return{name:p.name,note:p.note||'',plannedSets:(p.sets>0?p.sets:0),exIdx:exercises.length-1};
+  });
+  return{type:type,round:1,idx:0,items:items};
+}
+
+/* Pull the next block off the plan: one exercise, or a whole superset group. */
+function loadNextBlock(){
+  if(planIndex>=workoutPlan.length){activeBlock=null;planComplete=true;return false;}
+  var first=workoutPlan[planIndex];planIndex++;
+  var group=[first];
+  if(first.supersetGroup){
+    while(planIndex<workoutPlan.length&&workoutPlan[planIndex].supersetGroup===first.supersetGroup){
+      group.push(workoutPlan[planIndex]);planIndex++;
+    }
+  }
+  activeBlock=makeBlock(group,group.length>1?'superset':'single');
+  blockDone=false;
+  currentExIdx=activeBlock.items[0].exIdx;
+  refreshUI();
   return true;
 }
 
-function nextSupersetExercise(){
+function startNextBlockNow(auto){
+  hideNextUpCard();
+  if(isResting){completeRest(restStartMs?nowMs()-restStartMs:0);}
+  blockDone=false;
+  if(loadNextBlock()){
+    addLog('\u2192 '+curEx().name,'next exercise');
+    enterWorkingState(false);
+  } else {
+    showPlanComplete();
+  }
+}
+
+/* User wants one more round of the block that just finished. */
+function addExtraRound(){
   unlockAudio();
-  if(!supersetQueue.length) return;
-  if(!isResting&&setStartMs){var wm=nowMs()-setStartMs;currentExercise.sets.push({num:currentSetNum,workMs:wm});currentExercise.totalWorkMs+=wm;totalSets++;addLog(currentExercise.name+' · Set '+currentSetNum,fmt(wm/1000));}
-  var next=supersetQueue.shift();
-  currentExercise=newEx(next.name,next.note||'');exercises.push(currentExercise);currentSetNum=1;
-  updateExDisplay();updateSupersetBlock();enterWorkingState(false);
+  if(!activeBlock) return;
+  activeBlock.items.forEach(function(it){it.plannedSets=itemSetsDone(it)+1;});
+  blockDone=false;planComplete=false;
+  activeBlock.round++;
+  var first=nextRemainingIdx(0);
+  activeBlock.idx=first>=0?first:0;
+  currentExIdx=activeBlock.items[activeBlock.idx].exIdx;
+  hideNextUpCard();
+  addLog('+ Extra round','');
+  refreshUI();
+  if(!isResting){enterWorkingState(false);return;}
+  /* The block-end rest was an EXERCISE rest. We're staying in the same block
+     after all, so re-time it as a SET rest — and if that's already elapsed,
+     go straight back to work. */
+  restKind='set';restTotalSec=restSetSec;
+  setTimerCard('set-rest');
+  var el=restStartMs?(nowMs()-restStartMs)/1000:0;
+  if(el>=restTotalSec){
+    completeRest(el*1000);
+    addLog('Rest done','\u2192 go!');
+    enterWorkingState(false);
+  } else {
+    updateDoneButton();
+    startRestTick();
+  }
 }
 
-function updateSupersetBlock(){
-  var block=document.getElementById('superset-block'),list=document.getElementById('superset-list');
-  if(!supersetQueue.length){block.classList.add('hidden');return;}
-  block.classList.remove('hidden');
-  list.innerHTML=supersetQueue.map(function(e){return '<div class="superset-item"><span>'+e.name+'</span><span class="superset-item-note">'+e.note+'</span></div>';}).join('');
+function finishBlock(){
+  blockDone=true;
+  addLog(activeBlock&&activeBlock.type==='superset'?'Superset complete':'Exercise complete','\u2713');
+  if(planIndex>=workoutPlan.length)planComplete=true;
+  enterRestState('ex');
+  refreshUI();
+  showNextUpCard();
 }
 
-function updateQueueBlock(){
-  var card=document.getElementById('queue-card'),list=document.getElementById('queue-list');
-  var remaining=workoutPlan.slice(planIndex);
-  if(!remaining.length){card.classList.add('hidden');return;}
-  card.classList.remove('hidden');
-  list.innerHTML=remaining.slice(0,5).map(function(e,i){
-    var badge=e.supersetGroup?'<span class="queue-superset-badge">superset</span>':'';
-    return '<div class="queue-item"><span class="queue-num">'+(i+1)+'</span><span class="queue-name">'+e.name+badge+'</span><span class="queue-note">'+e.note+'</span></div>';
-  }).join('');
-  if(remaining.length>5)list.innerHTML+='<div style="font-size:0.62rem;color:var(--muted);padding:4px 0">+'+(remaining.length-5)+' more</div>';
+/* ============================================================
+   START
+   ============================================================ */
+function beginSession(){
+  sessionStartMs=nowMs();
+  exercises=[];logEntries=[];totalSets=0;accRestMs=0;
+  currentExIdx=-1;activeBlock=null;blockDone=false;planComplete=false;
+  restOwnerIdx=-1;isResting=false;changingEx=false;
+  document.getElementById('log-entries').innerHTML='';
+  hideNextUpCard();
+  startSessionTick();startSaveTick();
+  document.removeEventListener('visibilitychange',handleVisibility);
+  document.addEventListener('visibilitychange',handleVisibility);
 }
 
-/* START */
 function startWorkoutFromPlan(){
   unlockAudio();
-  planIndex=0;supersetQueue=[];sessionStartMs=nowMs();exercises=[];logEntries=[];totalSets=0;accRestMs=0;currentSetNum=1;
-  loadNextFromPlan();showScreen('active');enterWorkingState(false);startSessionTick();
-  setInterval(function(){if(sessionStartMs)saveSession();},3000);
-  document.addEventListener('visibilitychange',handleVisibility);
+  planIndex=0;
+  beginSession();
+  showScreen('active');
+  if(!loadNextBlock()){showPlanComplete();return;}
+  enterWorkingState(false);
 }
 
 function startWorkout(){
   unlockAudio();
   var name=document.getElementById('first-ex-input').value.trim();
   if(!name){document.getElementById('first-ex-input').focus();return;}
-  sessionStartMs=nowMs();workoutPlan=[];planIndex=0;supersetQueue=[];
-  currentExercise=newEx(name,'');exercises.push(currentExercise);currentSetNum=1;
-  showScreen('active');updateExDisplay();updateSupersetBlock();updateQueueBlock();
-  enterWorkingState(false);startSessionTick();
-  setInterval(function(){if(sessionStartMs)saveSession();},3000);
-  document.addEventListener('visibilitychange',handleVisibility);
+  workoutPlan=[];planIndex=0;
+  beginSession();
+  activeBlock=makeBlock([{name:name,note:'',sets:0}],'single');
+  currentExIdx=activeBlock.items[0].exIdx;
+  showScreen('active');refreshUI();
+  enterWorkingState(false);
 }
 
-/* WORKING STATE */
+/* ============================================================
+   WORKING / REST STATES
+   ============================================================ */
 function enterWorkingState(preserveStart){
   isResting=false;changingEx=false;
   if(!preserveStart)setStartMs=nowMs();
   clearInterval(_restTick);
   setTimerCard('working');
   document.getElementById('progress-wrap').classList.add('hidden');
-  document.getElementById('btn-done-set').textContent='✓ Done set — start rest';
-  document.getElementById('btn-done-set').className='btn btn-blue span2';
   document.getElementById('new-ex-card').classList.add('hidden');
+  hideNextUpCard();
+  document.getElementById('timer-display').textContent=fmt(setStartMs?(nowMs()-setStartMs)/1000:0);
+  updateDoneButton();
   startWorkTick();
 }
 
-/* DONE SET */
-function doneSet(){
-  unlockAudio();
-  if(isResting){restStartMs=nowMs();return;}
-  var workMs=nowMs()-setStartMs;
-  currentExercise.sets.push({num:currentSetNum,workMs:workMs});
-  currentExercise.totalWorkMs+=workMs;totalSets++;
-  addLog(currentExercise.name+' · Set '+currentSetNum,fmt(workMs/1000));
-  currentSetNum++;updateExDisplay();enterRestState('set');
-}
-
-/* REST */
 function enterRestState(kind){
-  isResting=true;restKind=kind;restTotalSec=kind==='set'?restSetSec:restExSec;restStartMs=nowMs();
-  clearInterval(_workTick);setTimerCard(kind==='set'?'set-rest':'ex-rest');
+  restOwnerIdx=currentExIdx;                 // this rest belongs to the set just finished
+  isResting=true;restKind=kind;
+  restTotalSec=(kind==='set'?restSetSec:restExSec);
+  restStartMs=nowMs();
+  clearInterval(_workTick);
+  setTimerCard(kind==='set'?'set-rest':'ex-rest');
   document.getElementById('progress-wrap').classList.remove('hidden');
   document.getElementById('progress-bar').style.width='100%';
-  document.getElementById('btn-done-set').textContent='✓ Done set — restart rest';
-  document.getElementById('btn-done-set').className='btn btn-dark span2';
+  document.getElementById('timer-display').textContent=fmt(restTotalSec);
+  updateDoneButton();
   startRestTick();
 }
+
+function restartRest(){
+  var el=restStartMs?nowMs()-restStartMs:0;
+  accRestMs+=el;
+  var owner=(restOwnerIdx>=0&&restOwnerIdx<exercises.length)?exercises[restOwnerIdx]:curEx();
+  if(owner)owner.totalRestMs+=el;
+  restTotalSec=(restKind==='set'?restSetSec:restExSec);
+  restStartMs=nowMs();
+  document.getElementById('progress-bar').style.width='100%';
+  startRestTick();
+}
+
 function skipRest(){
-  unlockAudio();if(!isResting)return;
-  clearInterval(_restTick);var el=restStartMs?nowMs()-restStartMs:0;
-  accRestMs+=el;if(currentExercise)currentExercise.totalRestMs+=el;
-  restStartMs=null;isResting=false;changingEx=false;
+  unlockAudio();
+  if(!isResting)return;
+  completeRest(restStartMs?nowMs()-restStartMs:0);
+  changingEx=false;
   document.getElementById('new-ex-card').classList.add('hidden');
-  addLog('Rest skipped','');enterWorkingState(false);
+  addLog('Rest skipped','');
+  if(planComplete&&blockDone){showPlanComplete();return;}
+  if(blockDone){startNextBlockNow();return;}
+  enterWorkingState(false);
 }
 
 function setTimerCard(state){
@@ -630,104 +847,320 @@ function setTimerCard(state){
   document.getElementById('timer-label').textContent=labels[state];
 }
 
-/* RENAME */
+/* ============================================================
+   DONE SET  — the heart of the superset fix
+   ============================================================ */
+function logCurrentSet(){
+  var e=curEx();
+  if(!e||setStartMs==null)return 0;
+  var wm=nowMs()-setStartMs;
+  var n=e.sets.length+1;
+  e.sets.push({num:n,workMs:wm});
+  e.totalWorkMs+=wm;totalSets++;
+  addLog(e.name+' \u00b7 Set '+n,fmt(wm/1000));
+  return wm;
+}
+
+function doneSet(){
+  unlockAudio();
+  if(planComplete&&blockDone&&!isResting){endWorkout();return;}
+  if(isResting){restartRest();return;}
+  if(!curEx())return;
+
+  logCurrentSet();
+
+  if(!activeBlock){enterRestState('set');refreshUI();return;}
+
+  /* 1. Superset: is there another movement still owed a set this round?
+        If so go straight into it — that is what a superset means. */
+  var nxt=(activeBlock.type==='superset')?nextRemainingIdx(activeBlock.idx+1):-1;
+  if(nxt!==-1){
+    activeBlock.idx=nxt;
+    currentExIdx=activeBlock.items[nxt].exIdx;
+    playTing('swap');
+    addLog('\u2192 '+curEx().name,'superset \u00b7 no rest');
+    refreshUI();
+    enterWorkingState(false);
+    return;
+  }
+
+  /* 2. Round finished. Anything left for another round? */
+  var first=nextRemainingIdx(0);
+  if(first===-1){finishBlock();return;}
+
+  /* 3. Rest, then come back to the TOP of the block for the next round. */
+  activeBlock.round++;
+  enterRestState('set');                 // owner = the set we just finished
+  activeBlock.idx=first;
+  currentExIdx=activeBlock.items[first].exIdx;
+  refreshUI();
+}
+
+/* ============================================================
+   RENAME
+   ============================================================ */
 function startRename(){
-  var el=document.getElementById('ex-name-display');if(!el)return;
-  el.outerHTML='<input class="ex-name-input" id="ex-name-input" type="text" value="'+currentExercise.name+'" maxlength="40"/>';
+  var el=document.getElementById('ex-name-display');if(!el||!curEx())return;
+  el.outerHTML='<input class="ex-name-input" id="ex-name-input" type="text" value="'+curEx().name+'" maxlength="40"/>';
   var inp=document.getElementById('ex-name-input');inp.focus();inp.select();
   inp.addEventListener('keydown',function(e){if(e.key==='Enter')confirmRename();if(e.key==='Escape')cancelRename();});
   document.getElementById('ex-actions-normal').classList.add('hidden');
   document.getElementById('ex-actions-rename').classList.remove('hidden');
 }
-function confirmRename(){var inp=document.getElementById('ex-name-input');var name=inp?inp.value.trim():'';if(!name)return;currentExercise.name=name;addLog('Renamed → '+name,'');cancelRename();}
-function cancelRename(){var inp=document.getElementById('ex-name-input');if(inp)inp.outerHTML='<div class="ex-name" id="ex-name-display">'+(currentExercise?currentExercise.name:'')+'</div>';document.getElementById('ex-actions-normal').classList.remove('hidden');document.getElementById('ex-actions-rename').classList.add('hidden');}
+function confirmRename(){
+  var inp=document.getElementById('ex-name-input');var name=inp?inp.value.trim():'';
+  if(!name||!curEx())return;
+  curEx().name=name;
+  if(curItem())curItem().name=name;
+  addLog('Renamed \u2192 '+name,'');
+  cancelRename();updateSupersetBlock();
+}
+function cancelRename(){
+  var inp=document.getElementById('ex-name-input');
+  if(inp)inp.outerHTML='<div class="ex-name" id="ex-name-display">'+(curEx()?curEx().name:'\u2014')+'</div>';
+  document.getElementById('ex-actions-normal').classList.remove('hidden');
+  document.getElementById('ex-actions-rename').classList.add('hidden');
+}
 
-/* CHANGE EXERCISE */
+/* ============================================================
+   CHANGE EXERCISE (manual override)
+   ============================================================ */
 function triggerChangeExercise(){
   unlockAudio();
-  if(!isResting&&setStartMs){var wm=nowMs()-setStartMs;currentExercise.sets.push({num:currentSetNum,workMs:wm});currentExercise.totalWorkMs+=wm;totalSets++;addLog(currentExercise.name+' · Set '+currentSetNum,fmt(wm/1000));}
+  if(!isResting&&setStartMs&&curEx())logCurrentSet();
   if(workoutPlan.length&&planIndex<workoutPlan.length) document.getElementById('new-ex-input').value=workoutPlan[planIndex].name;
-  changingEx=true;document.getElementById('new-ex-card').classList.remove('hidden');document.getElementById('new-ex-input').focus();
+  changingEx=true;
+  hideNextUpCard();
+  document.getElementById('new-ex-card').classList.remove('hidden');
+  document.getElementById('new-ex-input').focus();
   enterRestState('ex');
 }
 function confirmChangeExercise(){
   var name=document.getElementById('new-ex-input').value.trim();
   if(!name){document.getElementById('new-ex-input').focus();return;}
-  document.getElementById('new-ex-card').classList.add('hidden');document.getElementById('new-ex-input').value='';
-  var note='';
-  if(workoutPlan.length&&planIndex<workoutPlan.length){var pex=workoutPlan[planIndex];if(pex.name.toLowerCase()===name.toLowerCase()){note=pex.note||'';planIndex++;supersetQueue=[];if(pex.supersetGroup){while(planIndex<workoutPlan.length&&workoutPlan[planIndex].supersetGroup===pex.supersetGroup){supersetQueue.push(workoutPlan[planIndex]);planIndex++;}}}}
-  currentExercise=newEx(name,note);exercises.push(currentExercise);currentSetNum=1;changingEx=false;
-  addLog('→ '+name,'new exercise');updateExDisplay();updateSupersetBlock();updateQueueBlock();
+  document.getElementById('new-ex-card').classList.add('hidden');
+  document.getElementById('new-ex-input').value='';
+  changingEx=false;blockDone=false;
+
+  /* If they typed the name the plan expects, load the real block so a
+     superset partner comes with it. Otherwise start a free-form block. */
+  if(workoutPlan.length&&planIndex<workoutPlan.length&&
+     workoutPlan[planIndex].name.toLowerCase()===name.toLowerCase()){
+    loadNextBlock();
+  } else {
+    activeBlock=makeBlock([{name:name,note:'',sets:0}],'single');
+    currentExIdx=activeBlock.items[0].exIdx;
+  }
+  addLog('\u2192 '+name,'new exercise');
+  refreshUI();
   if(!isResting)enterWorkingState(false);
 }
-function cancelChangeExercise(){document.getElementById('new-ex-card').classList.add('hidden');document.getElementById('new-ex-input').value='';changingEx=false;addLog('Exercise change cancelled','');if(!isResting)enterWorkingState(false);}
-
-/* UI */
-function updateExDisplay(){
-  var el=document.getElementById('ex-name-display');if(el)el.textContent=currentExercise?currentExercise.name:'—';
-  var ne=document.getElementById('ex-note-display');if(ne)ne.textContent=currentExercise&&currentExercise.note?currentExercise.note:'';
-  document.getElementById('set-badge').textContent='SET '+currentSetNum;
+function cancelChangeExercise(){
+  document.getElementById('new-ex-card').classList.add('hidden');
+  document.getElementById('new-ex-input').value='';
+  changingEx=false;
+  addLog('Exercise change cancelled','');
+  if(!isResting)enterWorkingState(false);
 }
-function logType(label){if(label.startsWith('→')||/exercise|renamed/i.test(label))return 'nav';if(label==='Rest done'||label==='Rest skipped')return 'rest';if(label.includes('Set'))return 'set';return 'info';}
+
+/* ============================================================
+   UI
+   ============================================================ */
+function refreshUI(){updateExDisplay();updateSupersetBlock();updateQueueBlock();updateDoneButton();}
+
+function updateExDisplay(){
+  var e=curEx(),it=curItem();
+  var el=document.getElementById('ex-name-display');if(el)el.textContent=e?e.name:'\u2014';
+  var ne=document.getElementById('ex-note-display');if(ne)ne.textContent=e&&e.note?e.note:'';
+  var badge=document.getElementById('set-badge');if(!badge)return;
+  var n=curSetNum();
+  var txt;
+  if(it&&it.plannedSets>0)txt='SET '+Math.min(n,it.plannedSets)+' OF '+it.plannedSets;
+  else txt='SET '+n;
+  if(activeBlock&&activeBlock.type==='superset'){
+    var r=blockRounds();
+    txt+=' \u00b7 ROUND '+activeBlock.round+(r?'/'+r:'');
+  }
+  badge.textContent=txt;
+}
+
+function updateDoneButton(){
+  var b=document.getElementById('btn-done-set');if(!b)return;
+  if(planComplete&&blockDone&&!isResting){b.textContent='\u2713 Finish \u2014 see summary';b.className='btn btn-dark span2';return;}
+  if(isResting){b.textContent='\u2713 Done set \u2014 restart rest';b.className='btn btn-dark span2';return;}
+  var nxt=(activeBlock&&activeBlock.type==='superset')?nextRemainingIdx(activeBlock.idx+1):-1;
+  if(nxt!==-1){
+    b.textContent='\u2713 Done \u2014 straight into '+activeBlock.items[nxt].name;
+    b.className='btn btn-purple span2';
+  } else {
+    b.textContent='\u2713 Done set \u2014 start rest';
+    b.className='btn btn-blue span2';
+  }
+}
+
+function updateSupersetBlock(){
+  var block=document.getElementById('superset-block'),
+      list=document.getElementById('superset-list'),
+      label=document.getElementById('superset-label');
+  if(!block||!list)return;
+  if(!activeBlock||activeBlock.type!=='superset'){block.classList.add('hidden');return;}
+  block.classList.remove('hidden');
+  var r=blockRounds();
+  if(label)label.innerHTML='&#128279; Superset \u00b7 Round '+activeBlock.round+(r?' of '+r:'');
+  list.innerHTML=activeBlock.items.map(function(it,i){
+    var done=itemSetsDone(it);
+    var state=(i===activeBlock.idx&&!blockDone)?'now':(itemHasRemaining(it)?'todo':'done');
+    var count=it.plannedSets>0?(done+'/'+it.plannedSets+' sets'):(done+' sets');
+    return '<div class="superset-item '+state+'"><span><span class="ss-dot"></span>'+it.name+'</span>'+
+           '<span class="superset-item-note">'+count+'</span></div>';
+  }).join('');
+}
+
+function updateQueueBlock(){
+  var card=document.getElementById('queue-card'),list=document.getElementById('queue-list');
+  if(!card||!list)return;
+  var groups=planGroups(workoutPlan.slice(planIndex));
+  if(!groups.length){card.classList.add('hidden');return;}
+  card.classList.remove('hidden');
+  list.innerHTML=groups.slice(0,4).map(function(g,i){
+    var badge=g.length>1?' <span class="queue-superset-badge">superset</span>':'';
+    var names=g.map(function(e){return e.name;}).join(' + ');
+    var note=g.map(function(e){return e.note;}).filter(Boolean).join(' / ');
+    return '<div class="queue-item"><span class="queue-num">'+(i+1)+'</span>'+
+           '<span class="queue-name">'+names+badge+'</span>'+
+           '<span class="queue-note">'+note+'</span></div>';
+  }).join('');
+  if(groups.length>4)list.innerHTML+='<div style="font-size:0.62rem;color:var(--muted);padding:4px 0">+'+(groups.length-4)+' more</div>';
+}
+
+function nextUpPreview(){
+  if(planIndex>=workoutPlan.length)return null;
+  var g=[workoutPlan[planIndex]];
+  if(g[0].supersetGroup){
+    var j=planIndex+1;
+    while(j<workoutPlan.length&&workoutPlan[j].supersetGroup===g[0].supersetGroup){g.push(workoutPlan[j]);j++;}
+  }
+  return g;
+}
+
+function showNextUpCard(){
+  var card=document.getElementById('next-up-card');if(!card)return;
+  var labelEl=document.getElementById('next-up-label'),
+      nameEl=document.getElementById('next-up-name'),
+      startBtn=document.getElementById('next-up-start');
+  var doneLabel=(activeBlock&&activeBlock.type==='superset')?'Superset complete':'Exercise complete';
+  var g=nextUpPreview();
+  if(g){
+    labelEl.textContent=doneLabel+' \u2014 up next';
+    nameEl.textContent=g.map(function(e){return e.name;}).join(' + ')+(g.length>1?'  \u00b7 superset':'');
+    startBtn.textContent='Start now';
+  } else {
+    labelEl.textContent=doneLabel+' \u2014 plan finished';
+    nameEl.textContent='That was the last exercise.';
+    startBtn.textContent='Finish workout';
+  }
+  card.classList.remove('hidden');
+}
+function hideNextUpCard(){var c=document.getElementById('next-up-card');if(c)c.classList.add('hidden');}
+function nextUpPrimary(){
+  unlockAudio();
+  if(nextUpPreview()){startNextBlockNow();}
+  else{hideNextUpCard();endWorkout();}
+}
+
+function showPlanComplete(){
+  planComplete=true;blockDone=true;
+  clearInterval(_workTick);clearInterval(_restTick);
+  setStartMs=null;isResting=false;
+  setTimerCard('working');
+  document.getElementById('timer-label').textContent='PLAN COMPLETE';
+  document.getElementById('timer-display').textContent='00:00';
+  document.getElementById('progress-wrap').classList.add('hidden');
+  updateDoneButton();
+  showNextUpCard();
+}
+
+function logType(label){if(label.startsWith('\u2192')||/exercise|renamed|superset|round/i.test(label))return 'nav';if(label.indexOf('Rest')===0)return 'rest';if(label.indexOf('Set')>-1)return 'set';return 'info';}
 function addLog(label,detail){
   var type=logType(label);logEntries.unshift({label:label,detail:detail,type:type});
-  var container=document.getElementById('log-entries');var div=document.createElement('div');
+  var container=document.getElementById('log-entries');if(!container)return;
+  var div=document.createElement('div');
   div.className='log-entry type-'+type+' fade-in';
   div.innerHTML='<span class="log-entry-name">'+label+'</span><span class="log-entry-detail">'+detail+'</span>';
   container.prepend(div);
 }
 function rebuildLogUI(){
   var container=document.getElementById('log-entries');container.innerHTML='';
-  logEntries.slice().reverse().forEach(function(e){var t=e.type||logType(e.label);var div=document.createElement('div');div.className='log-entry type-'+t;div.innerHTML='<span class="log-entry-name">'+e.label+'</span><span class="log-entry-detail">'+e.detail+'</span>';container.prepend(div);});
+  logEntries.slice().reverse().forEach(function(e){
+    var t=e.type||logType(e.label);var div=document.createElement('div');
+    div.className='log-entry type-'+t;
+    div.innerHTML='<span class="log-entry-name">'+e.label+'</span><span class="log-entry-detail">'+e.detail+'</span>';
+    container.prepend(div);
+  });
 }
 
-/* END */
+/* ============================================================
+   END
+   ============================================================ */
 function confirmEndWorkout(){
   var btn=document.getElementById('btn-end-workout');if(!btn)return;
   if(btn.dataset.confirming==='1'){btn.dataset.confirming='0';endWorkout();}
-  else{btn.dataset.confirming='1';btn.textContent='⚠ Tap again to end';btn.style.color='var(--warn)';btn.style.borderColor='var(--warn)';
+  else{btn.dataset.confirming='1';btn.textContent='\u26a0 Tap again to end';btn.style.color='var(--warn)';btn.style.borderColor='var(--warn)';
     setTimeout(function(){if(btn&&btn.dataset.confirming==='1'){btn.dataset.confirming='0';btn.textContent='End workout';btn.style.color='';btn.style.borderColor='';}},3000);}
 }
 
 function endWorkout(){
   var snap=sessionStartMs;
-  clearSession();clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);
+  clearSession();
+  clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);clearInterval(_saveTick);
   sessionStartMs=null;document.removeEventListener('visibilitychange',handleVisibility);
-  if(!isResting&&setStartMs&&currentExercise){var wm=nowMs()-setStartMs;currentExercise.sets.push({num:currentSetNum,workMs:wm});currentExercise.totalWorkMs+=wm;totalSets++;}
+  if(!isResting&&setStartMs&&curEx()&&!planComplete)logCurrentSet();
   var totalMs=snap?(nowMs()-snap):0;
   var totalRestMs=accRestMs+(isResting&&restStartMs?nowMs()-restStartMs:0);
   var totalWorkMs=Math.max(0,totalMs-totalRestMs);
   playTing('end');
-  saveToHistory({id:String(snap),date:snap,totalMs:totalMs,totalWorkMs:totalWorkMs,totalRestMs:totalRestMs,totalSets:totalSets,exercises:exercises.map(function(ex){return{name:ex.name,note:ex.note||'',sets:ex.sets,totalWorkMs:ex.totalWorkMs,totalRestMs:ex.totalRestMs};})});
+  var done=exercises.filter(function(ex){return ex.sets.length>0;});
+  saveToHistory({id:String(snap),date:snap,totalMs:totalMs,totalWorkMs:totalWorkMs,totalRestMs:totalRestMs,totalSets:totalSets,
+    exercises:done.map(function(ex){return{name:ex.name,note:ex.note||'',superset:!!ex.superset,sets:ex.sets,totalWorkMs:ex.totalWorkMs,totalRestMs:ex.totalRestMs};})});
   showScreen('summary');
   document.getElementById('sum-total').textContent=fmt(totalMs/1000);
   document.getElementById('sum-work').textContent=fmt(totalWorkMs/1000);
   document.getElementById('sum-rest').textContent=fmt(totalRestMs/1000);
   document.getElementById('sum-sets').textContent=totalSets;
   var exC=document.getElementById('sum-exercises');exC.innerHTML='';
-  exercises.forEach(function(ex){
+  done.forEach(function(ex){
     var div=document.createElement('div');div.className='summary-exercise';
     var rows=ex.sets.map(function(s){return '<div class="summary-ex-set-row"><span>Set '+s.num+'</span><span>'+fmt(s.workMs/1000)+'</span></div>';}).join('');
-    div.innerHTML='<div class="summary-ex-header"><span class="summary-ex-name">'+ex.name+'</span><span class="summary-ex-time">'+fmtD(ex.totalWorkMs)+' active</span></div>'+(ex.note?'<div class="summary-ex-sets">'+ex.note+'</div>':'')+'<div class="summary-ex-sets">'+ex.sets.length+' sets · '+fmtD(ex.totalRestMs)+' rest</div>'+rows;
+    var tag=ex.superset?' <span class="queue-superset-badge">superset</span>':'';
+    div.innerHTML='<div class="summary-ex-header"><span class="summary-ex-name">'+ex.name+tag+'</span><span class="summary-ex-time">'+fmtD(ex.totalWorkMs)+' active</span></div>'+
+      (ex.note?'<div class="summary-ex-sets">'+ex.note+'</div>':'')+
+      '<div class="summary-ex-sets">'+ex.sets.length+' sets \u00b7 '+fmtD(ex.totalRestMs)+' rest</div>'+rows;
     exC.appendChild(div);
   });
 }
 
-/* RESET */
+/* ============================================================
+   RESET
+   ============================================================ */
 function resetApp(){
-  clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);
+  clearInterval(_restTick);clearInterval(_workTick);clearInterval(_sessionTick);clearInterval(_saveTick);
   document.removeEventListener('visibilitychange',handleVisibility);
-  restSetSec=30;restExSec=60;sessionStartMs=setStartMs=restStartMs=null;restTotalSec=accRestMs=0;
-  isResting=false;restKind='set';changingEx=false;currentExercise=null;currentSetNum=1;totalSets=0;
-  exercises=[];logEntries=[];planIndex=0;supersetQueue=[];
+  restSetSec=30;restExSec=60;sessionStartMs=setStartMs=restStartMs=null;restTotalSec=accRestMs=0;restOwnerIdx=-1;
+  isResting=false;restKind='set';changingEx=false;currentExIdx=-1;totalSets=0;
+  exercises=[];logEntries=[];planIndex=0;activeBlock=null;blockDone=false;planComplete=false;
   document.getElementById('first-ex-input').value='';
   document.getElementById('log-entries').innerHTML='';document.getElementById('sum-exercises').innerHTML='';
-  document.getElementById('new-ex-card').classList.add('hidden');document.getElementById('superset-block').classList.add('hidden');document.getElementById('queue-card').classList.add('hidden');
+  document.getElementById('new-ex-card').classList.add('hidden');
+  document.getElementById('superset-block').classList.add('hidden');
+  document.getElementById('queue-card').classList.add('hidden');
+  hideNextUpCard();
   syncRestUI();showScreen('start');clearSession();
   try{var p=localStorage.getItem('wt_plan_v1');if(p){workoutPlan=JSON.parse(p);updateStartPlanUI();}}catch(e){}
 }
 
-/* HISTORY */
+/* ============================================================
+   HISTORY
+   ============================================================ */
 function renderHistory(){
   var list=document.getElementById('history-list');
   var history=loadHistory();
@@ -739,7 +1172,8 @@ function renderHistory(){
     item.dataset.id=String(rec.id);
     var exRows=rec.exercises.map(function(ex){
       var chips=ex.sets.map(function(s){return '<span class="hist-set-chip">Set '+s.num+' &middot; '+fmt(s.workMs/1000)+'</span>';}).join('');
-      return '<div class="hist-ex"><div class="hist-ex-header"><span class="hist-ex-name">'+ex.name+'</span><span class="hist-ex-duration">'+fmtD(ex.totalWorkMs)+'</span></div>'+(ex.note?'<div class="hist-ex-rest">'+ex.note+'</div>':'')+'<div class="hist-ex-sets">'+chips+'</div><div class="hist-ex-rest">Rest: '+fmtD(ex.totalRestMs)+'</div></div>';
+      var tag=ex.superset?' <span class="queue-superset-badge">superset</span>':'';
+      return '<div class="hist-ex"><div class="hist-ex-header"><span class="hist-ex-name">'+ex.name+tag+'</span><span class="hist-ex-duration">'+fmtD(ex.totalWorkMs)+'</span></div>'+(ex.note?'<div class="hist-ex-rest">'+ex.note+'</div>':'')+'<div class="hist-ex-sets">'+chips+'</div><div class="hist-ex-rest">Rest: '+fmtD(ex.totalRestMs)+'</div></div>';
     }).join('');
     var header=document.createElement('div');
     header.className='history-item-header';
@@ -760,21 +1194,41 @@ function renderHistory(){
 }
 function toggleHistory(id){var item=document.querySelector('.history-item[data-id="'+id+'"]');if(item)item.classList.toggle('open');}
 
-/* BOOT */
+/* ============================================================
+   BOOT
+   ============================================================ */
 document.addEventListener('DOMContentLoaded',function(){
   document.getElementById('first-ex-input').addEventListener('keydown',function(e){if(e.key==='Enter')startWorkout();});
   document.getElementById('new-ex-input').addEventListener('keydown',function(e){if(e.key==='Enter')confirmChangeExercise();if(e.key==='Escape')cancelChangeExercise();});
   if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
   try{var p=localStorage.getItem('wt_plan_v1');if(p){workoutPlan=JSON.parse(p);updateStartPlanUI();}}catch(e){}
+
   if(restoreSession()){
-    syncRestUI();showScreen('active');updateExDisplay();rebuildLogUI();updateSupersetBlock();updateQueueBlock();
-    startSessionTick();setInterval(function(){if(sessionStartMs)saveSession();},3000);
+    syncRestUI();showScreen('active');refreshUI();rebuildLogUI();
+    startSessionTick();startSaveTick();
     document.addEventListener('visibilitychange',handleVisibility);
+    if(planComplete&&blockDone&&!isResting){showPlanComplete();return;}
     if(isResting){
-      var elapsed=restStartMs?(nowMs()-restStartMs)/1000:restTotalSec;
-      if(elapsed>=restTotalSec){restStartMs=null;isResting=false;accRestMs+=restTotalSec*1000;addLog('Rest done (while away)','→ go!');if(!changingEx)enterWorkingState(false);else{setTimerCard('ex-rest');document.getElementById('progress-wrap').classList.remove('hidden');document.getElementById('new-ex-card').classList.remove('hidden');}}
-      else{setTimerCard(restKind==='set'?'set-rest':'ex-rest');document.getElementById('progress-wrap').classList.remove('hidden');document.getElementById('btn-done-set').textContent='✓ Done set — restart rest';document.getElementById('btn-done-set').className='btn btn-dark span2';if(changingEx)document.getElementById('new-ex-card').classList.remove('hidden');startRestTick();}
-    } else {enterWorkingState(true);}
+      var elapsedMs=restStartMs?(nowMs()-restStartMs):restTotalSec*1000;
+      if(elapsedMs/1000>=restTotalSec){
+        completeRest(elapsedMs);
+        addLog('Rest done (while away)','\u2192 go!');
+        if(changingEx){
+          setTimerCard('ex-rest');
+          document.getElementById('progress-wrap').classList.remove('hidden');
+          document.getElementById('new-ex-card').classList.remove('hidden');
+        } else {afterRest();}
+      } else {
+        setTimerCard(restKind==='set'?'set-rest':'ex-rest');
+        document.getElementById('progress-wrap').classList.remove('hidden');
+        updateDoneButton();
+        if(changingEx)document.getElementById('new-ex-card').classList.remove('hidden');
+        if(blockDone)showNextUpCard();
+        startRestTick();
+      }
+    } else {
+      enterWorkingState(true);
+    }
   }
 });
 </script>
