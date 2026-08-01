@@ -1,5 +1,5 @@
-// Cache name — bump this (v3, v4…) whenever you want to force phones to refetch.
-const CACHE = 'workout-v2';
+// Cache name — bump this (v4, v5…) whenever you want to force phones to refetch.
+const CACHE = 'workout-v3';
 
 // Relative paths. These resolve against wherever sw.js lives, so they work
 // under /Workout-Timer/ on GitHub Pages and at the root on any other host.
